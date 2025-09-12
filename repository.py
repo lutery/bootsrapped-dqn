@@ -27,11 +27,20 @@ class memoryDataset(object):
         if n_ensemble==1:
             self.bernoulli_prob = 1
 
-        # todo 作用？
+        # 声明一个命名元组，用于存储状态转换信息
         self.subset = namedtuple('Transition', ('state', 'action', 'next_state', 'reward', 'done', 'life', 'terminal', 'mask'))
 
 
     def push(self, state, action, next_state, reward, done, life, terminal):
+        '''
+        state: np.array, current state 当前状态
+        action: int, action taken 执行动作
+        next_state: np.array, next state after taking action 执行动作后的下一个状态
+        reward: float, reward received after taking action 执行动作后获得的奖励
+        done: boolean, whether the episode is done 是否结束
+        life: int, number of lives left 剩余生命数
+        terminal: boolean, whether the episode is done due to losing a life 是否因为失去生命而结束
+        '''
 
         state = np.array(state)
         action = np.array([action])
@@ -40,17 +49,21 @@ class memoryDataset(object):
         done = np.array([done])
         life = np.array([life])
         terminal = np.array([terminal])
-        mask = np.random.binomial(1, self.bernoulli_prob, self.n_ensemble)
+        mask = np.random.binomial(1, self.bernoulli_prob, self.n_ensemble) # todo 作用？看起来是生成一个伯努利分布的掩码，作用是啥？
 
+        # 将收集的状态信息存储到缓冲区中
         self.memory.append(self.subset(state, action, next_state, reward, done, life, terminal, mask))
 
     def __len__(self):
         return len(self.memory)
 
     def sample(self, batch_size):
+        # 从缓冲区中随机采样一个批次的状态转换信息，不是连续的
         batch = random.sample(self.memory, min(len(self.memory), batch_size))
-        batch = self.subset(*zip(*batch))
+        # 将采样的batch，重新解包重组，将state、action等分别堆叠在一起
+        batch = self.subset(*zip(*batch)) # todo 学习
 
+        # 将numpy array转换为torch tensor重新打包为命名元组
         state = torch.tensor(np.stack(batch.state), dtype=torch.float)
         action = torch.tensor(np.stack(batch.action), dtype=torch.long)
         reward = torch.tensor(np.stack(batch.reward), dtype=torch.float)
@@ -62,7 +75,7 @@ class memoryDataset(object):
         terminal = torch.tensor(np.stack(batch.terminal), dtype=torch.long)
         mask = torch.tensor(np.stack(batch.mask), dtype=torch.float)
         batch = self.subset(state, action, next_state, reward, done, life, terminal, mask)
-
+        
         return batch
 
 class historyDataset(object):

@@ -55,7 +55,7 @@ class DQNSolver():
         self.env = gym.make(config.env) # 创建训练环境和验证环境，没有额外的环境包装（比如帧堆叠、跳帧等）
         self.valid_env = gym.make(config.env)
         self.memory_size = config.memory_size 
-        self.update_freq = config.update_freq 
+        self.update_freq = config.update_freq # 训练更新模型的频率
         self.learn_start = config.learn_start # 模型正式训练起始步数，估计有一段是再收集数据
         self.history_size = config.history_size
 
@@ -214,8 +214,12 @@ class DQNSolver():
         return epsilon
 
     def replay(self, batch_size):
+        '''
+        batch_size: int, number of samples in a batch 批次大小
+        '''
         self.optimizer.zero_grad()
 
+        # 随机采样不连续的batch_size个样本
         batch = self.memory.sample(batch_size)
 
         state = batch.state.to(self.device)
@@ -382,7 +386,7 @@ class DQNSolver():
         ##If it is done everytime init value
         train_score = 0
         train_length = 0
-        last_life = 0
+        last_life = 0 # 记录上一次的生命数
         terminal = True
 
         ## number of ensemble
@@ -431,15 +435,18 @@ class DQNSolver():
                 life = life['ale.lives'] # 获取还剩余的生命数
                 train_length = train_length + 1  # todo 有点疑似当前游戏回合的步数
 
-                ## Terminal options
+                ## Terminal options 判断生命是否丢失，如果丢失则判定为中断
+                # 因为对于breakout游戏，中断了需要执行动作1才能继续游戏
                 if life < last_life:
                     terminal = True
                 else :
                     terminal = False
                 last_life = life
 
+                # 将当前的观察样本、动作、奖励、下一个观察样本、是否中断等存储到经验回放池
                 self.memory.push(state, action, next_state, reward, done, life, terminal)
                 if step > self.learn_start and step % self.update_freq == 0:
+                    # 达到了起始训练的步数，并且到了训练的更新频率，则进行模型训练
                     self.replay(self.batch_size)
 
                 train_score = train_score + reward
