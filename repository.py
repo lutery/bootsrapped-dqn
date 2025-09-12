@@ -9,14 +9,25 @@ import copy
 
 class memoryDataset(object):
     def __init__(self, maxlen, n_ensemble=1, bernoulli_prob=0.9):
+        '''
+        maxlen: int, maximum length of memory 缓冲区的长度
+        n_ensemble: int, number of ensemble heads
+        bernoulli_prob: float, probability of each head to be trained on each transition
+         0 < bernoulli_prob <= 1
+         if bernoulli_prob = 1, then all heads are trained on all transitions
+         if bernoulli_prob = 0.5, then each head is trained on half of the transitions
+         if bernoulli_prob = 0, then no head is trained on any transition
+        '''
         self.memory = deque(maxlen=maxlen)
         self.n_ensemble = n_ensemble
         self.bernoulli_prob = bernoulli_prob
 
         ## if ensemble is 0 then no need to apply mask
+        # todo 为啥？
         if n_ensemble==1:
             self.bernoulli_prob = 1
 
+        # todo 作用？
         self.subset = namedtuple('Transition', ('state', 'action', 'next_state', 'reward', 'done', 'life', 'terminal', 'mask'))
 
 
@@ -55,7 +66,16 @@ class memoryDataset(object):
         return batch
 
 class historyDataset(object):
+    '''
+    todo 作用
+    对观察样本进行预处理（包含裁剪、缩放、图片多通道合并二值化、帧堆叠）
+    '''
     def __init__(self, history_size, img, crop_flag=False):
+        '''
+        history_size: int, number of frames to stack
+        img: np.array, initial observation image 输出图像的观察图片
+        crop_flag: boolean, whether to crop the image (for breakout) 是否对图片进行裁剪，去除多余的无效区域
+        '''
         self.history_size = history_size
         self.crop_flag = crop_flag
 
@@ -72,21 +92,28 @@ class historyDataset(object):
         # remove useless item
 
         if self.crop_flag:
+            # 裁减无效的区域
             img = img[31:193, 8:152]
 
         #img = rescale(img, 1.0 / 2.0, anti_aliasing=False, multichannel=False)
+        # 将图片转换为84x84
         img = resize(img, output_shape=(84, 84))
 
         # conver channel(3) -> channel(1)
+        # 对每个像素的RGB值进行逻辑或操作，只要有一个通道非零，结果就为True
+        # 这样可以将彩色图像转换为二值图像，保留了图像中的边缘和形状信息
         img = np.any(img, axis=2)
         # |img| = (Height, Width)  boolean
         return img
 
     def push(self, img):
+        '''
+        img： np.array, new observation image 新的额观察数据
+        '''
         temp = self.history
         state = self.convert_channel(img)
         temp.append(state)
-        self.history = temp[1:]
+        self.history = temp[1:] # 将新的观察图像加入历史记录，并移除最旧的图像，貌似时帧堆叠
 
     def get_state(self):
         #return self.history

@@ -43,6 +43,7 @@ def save_numpy(temp_data, path, name):
     np.save(temp_path, temp_data)
 
 def build_model(config):
+    # 构建动作策略模型
     return EnsembleNet(n_ensemble=config.n_ensemble, n_actions=config.class_num, h=config.resize_unit[0], w=config.resize_unit[1],
                 num_channels=config.history_size)
 
@@ -51,24 +52,24 @@ class DQNSolver():
 
     def __init__(self, config):
         self.device = config.device
-        self.env = gym.make(config.env)
+        self.env = gym.make(config.env) # 创建训练环境和验证环境，没有额外的环境包装（比如帧堆叠、跳帧等）
         self.valid_env = gym.make(config.env)
-        self.memory_size = config.memory_size
-        self.update_freq = config.update_freq
-        self.learn_start = config.learn_start
+        self.memory_size = config.memory_size 
+        self.update_freq = config.update_freq 
+        self.learn_start = config.learn_start # 模型正式训练起始步数，估计有一段是再收集数据
         self.history_size = config.history_size
 
         self.batch_size = config.batch_size
-        self.ep = config.ep
-        self.eps_end = config.eps_end
-        self.eps_endt = config.eps_endt
+        self.ep = config.ep # epsilon-贪婪策略中的初始epsilon
+        self.eps_end = config.eps_end # epsilon-贪婪策略中的最小epsilon
+        self.eps_endt = config.eps_endt # epsilon-贪婪策略中的epsilon衰减步数，也即是多少步后epsilon衰减到最小值
         self.eps_start = self.learn_start
 
         self.lr = config.lr
         self.discount = config.discount
 
         self.agent_type = config.agent_type
-        self.max_steps = config.max_steps
+        self.max_steps = config.max_steps # 训练的最大步数
         self.eval_freq = config.eval_freq
         self.eval_steps = config.eval_steps
         self.target_update = config.target_update
@@ -76,6 +77,7 @@ class DQNSolver():
 
         ##Breakout Setting
         if config.pretrained_dir is not None:
+            # 测试时加载预训练模型和预训练配置
             pretrained_config = load_saved_config(config.pretrained_dir)
             config.n_ensemble = pretrained_config.n_ensemble
             config.class_num = pretrained_config.class_num
@@ -87,10 +89,10 @@ class DQNSolver():
             self.target_model = load_saved_model(target_model, config.pretrained_dir)
 
         else:
-            config.resize_unit = (84, 84)
+            config.resize_unit = (84, 84) # 训练的观察size=84
             config.class_num = self.env.action_space.n
-            self.policy_model = build_model(config)
-            self.target_model = build_model(config)
+            self.policy_model = build_model(config) # 构建动作策略模型
+            self.target_model = build_model(config) # 构建目标动作策略模型
 
         self.resize_unit = config.resize_unit
         self.class_num = config.class_num
@@ -99,22 +101,29 @@ class DQNSolver():
         self.policy_model.to(config.device)
         self.target_model.to(config.device)
 
+        # 构建动作策略模型优化器
         self.optimizer = optim.Adam(params=self.policy_model.parameters(), lr=self.lr)
 
         ##INIT Memory SETTING
+        # 构建训练数据经验回放池
         self.memory = memoryDataset(maxlen=config.memory_size, n_ensemble=config.n_ensemble,
                                     bernoulli_prob=config.bernoulli_prob)
 
         ##INIT LOGGER
+        # 清理日志系统已有的处理器，防止重复记录日志
         if not logging.getLogger() == None:
             for handler in logging.getLogger().handlers[:]:  # make a copy of the list
+                # 遍历所有的处理器并移除它们
                 logging.getLogger().removeHandler(handler)
+        # 设置日志配置，包含日志文件的名字和日志级别
         logging.basicConfig(filename=LOG_FILE, level=LOGFILE_LEVEL) ## set log config
+        # 设置控制台日志处理器，指定日志级别，保证控制器也能够输出日志
         console = logging.StreamHandler() # console out
         console.setLevel(CONSOLE_LEVEL) # set log level
         logging.getLogger().addHandler(console)
 
         ##save options
+        # 构建输出目录
         self.out_dir = config.out_dir
         if not os.path.isdir(config.out_dir):
             os.mkdir(config.out_dir)
@@ -125,17 +134,20 @@ class DQNSolver():
         self.train_length_memory = []
 
         ##중간시작
-        self.start_steps = config.start_steps
+        self.start_steps = config.start_steps # 训练的起始步数
         self.learn_start = self.learn_start + self.start_steps
         self.eval_steps = self.eval_steps + self.start_steps
 
         self.config = config
+        # 保存配置，也就是保存本次训练的参数，以便后续加载模型/训练模式时使用
         save_config(config, self.out_dir)
 
+        # todo 作用
         self.refer_img = config.refer_img
         if self.refer_img is not None:
             assert os.path.isdir(self.refer_img), 'there is no reference image folder'
 
+        # todo 作用
         self.crop_flag = False
         if 'breakout' in config.env.lower():
             self.crop_flag = True
@@ -144,23 +156,35 @@ class DQNSolver():
 
 
     def choose_action(self, history, header_number:int=None, epsilon=None):
+        '''
+        history： historyDataset object, 观察样本处理对象
+        header_number: int, number of ensemble head, 选择哪个头
+        epsilon: float, epsilon for epsilon-greedy action selection, epsilon-贪婪策略中的epsilon
+        '''
         if epsilon is not None:
+            # 如果开启了epsilon-贪婪策略
             if np.random.random() <= epsilon:
+                # 随机选中额一个动作
                 return self.env.action_space.sample()
             else:
+                # 如果没有随机选中动作，则使用目标模型选择动作
                 with torch.no_grad():
                     state = torch.tensor(history.get_state(), dtype=torch.float).unsqueeze(0).to(self.device)
                     if header_number is not None:
+                        # 如果指定了头编号，则使用指定的头进行动作选择
                         action = self.target_model(state, header_number).cpu()
                         return int(action.max(1).indices.numpy())
                     else:
                         # vote
+                        # 没有指定头编号，则使用所有头进行投票选择动作
+                        # 也就是每个头选择一个动作，然后选择出现频率最高的动作
                         actions = self.target_model(state)
                         actions = [int(action.cpu().max(1).indices.numpy()) for action in actions]
                         actions = Counter(actions)
                         action = actions.most_common(1)[0][0]
                         return action
         else:
+            # 如果没有传递epsilon参数，则直接使用训练的动作策略模型选择动作
             with torch.no_grad():
                 state = torch.tensor(history.get_state(), dtype=torch.float).unsqueeze(0).to(self.device)
                 if header_number is not None:
@@ -177,6 +201,15 @@ class DQNSolver():
 
 
     def get_epsilon(self, t):
+        '''
+        t: int, current time step 当前时间步
+        根据步数t计算epsilon的值
+        '''
+        # (self.ep - self.eps_end)： 代表epsilon的衰减范围
+        # max(0, t - self.eps_start)： 代表从起始步数开始计算的当前时间步数
+        # (self.eps_endt - max(0, t - self.eps_start)): 代表剩余的衰减步数
+        # (self.eps_endt - max(0, t - self.eps_start))/self.eps_endt : 代表剩余衰减步数占总衰减步数的比例
+        # (self.ep - self.eps_end) * (self.eps_endt - max(0, t - self.eps_start)) / self.eps_endt : 代表当前时间步下，epsilon的真实值
         epsilon =  self.eps_end + max(0, (self.ep - self.eps_end)*(self.eps_endt - max(0, t - self.eps_start)) /self.eps_endt )
         return epsilon
 
@@ -333,8 +366,10 @@ class DQNSolver():
 
 
     def train(self):
-        progress_bar = tqdm(range(self.start_steps, self.max_steps))
-        state = self.env.reset()
+        # 训练模型
+        progress_bar = tqdm(range(self.start_steps, self.max_steps)) # 构建整体的训练进度
+        state = self.env.reset() # 重置环境
+        # 构建历史观察样本处理对象，包含裁剪、缩放、图片多通道合并二值化、帧堆叠，也就是观察预处理增强
         history = historyDataset(self.history_size, state, self.crop_flag)
         done = False
 
@@ -352,18 +387,20 @@ class DQNSolver():
 
         ## number of ensemble
         heads = list(range(self.n_ensemble))
-        active_head = heads[0]
+        active_head = heads[0] # todo 作用
 
         try:
             for step in progress_bar:
+                # 训练开始
 
                 ## model update
                 if step > self.learn_start and step % self.target_update == 0:
+                    # 每隔一段时间将动作策略模型的参数复制到目标动作策略模型
                     self.target_model.load_state_dict(self.policy_model.state_dict())
 
                 ## game is over
                 if done:
-
+                    # todo
                     np.random.shuffle(heads)
                     active_head = heads[0]
 
@@ -379,15 +416,20 @@ class DQNSolver():
                     last_life = 0
                     terminal = True
 
+                # 选择动作，这里的动作预测头使用的是active_head
+                # todo active_head是怎么选择的
                 action = self.choose_action(history, active_head, self.get_epsilon(step))
                 if terminal: ## There is error when it is just started. So do action = 1 at first
+                    # 因为Breakout游戏的特殊性，游戏开始时需要执行一个动作1才能真正开始
+                    # 而游戏刚开始或者者生命值减少时，terminal会被置为True
+                    # 这个时候就必须执行动作1才能继续游戏
                     action = 1
                 next_state, reward, done, life = self.env.step(action)
-                state = history.get_state()
+                state = history.get_state() # 获取当前的环境观察样本
                 history.push(next_state)
-                next_state = history.get_state()
-                life = life['ale.lives']
-                train_length = train_length + 1
+                next_state = history.get_state() # 获取执行动作后的下一个环境观察样本，这里是将实际执行的帧堆叠等处理后的样本作为实际的观察，因为他没有使用gym的环境包装
+                life = life['ale.lives'] # 获取还剩余的生命数
+                train_length = train_length + 1  # todo 有点疑似当前游戏回合的步数
 
                 ## Terminal options
                 if life < last_life:
