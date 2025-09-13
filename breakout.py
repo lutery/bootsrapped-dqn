@@ -270,7 +270,7 @@ class DQNSolver():
         if len(total_loss) > 0:
             # 计算所有头的平均loss
             # 然后开始反向传播和优化
-            total_loss = sum(total_loss)/self.n_ensemble
+            total_loss = sum(total_loss)/self.n_ensemble # 之前的loss计算，其中的梯度计算时 特征提取网络会重复累积，所以需要除以n_ensemble，但是动作预测头不需要除以n_ensemble，所以需要调整 todo 对比调整
             total_loss.backward()
             self.optimizer.step()
 
