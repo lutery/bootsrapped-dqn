@@ -405,3 +405,92 @@ target_net = EnsembleNet(N_ENSEMBLE)
 总结：
 - prior_net 提供固定随机先验，增强各 head 的持久差异与探索，和当前配置（EPSILON=0, BERNOULLI_P=1）非常契合。
 - 可以不用，但需要用其它探索机制替代，否则学习质量和稳定性可能明显下降。
+
+# 当前代码中prior_net时没有被训练的事吗？
+是的，你的观察是正确的！**`prior_net` 没有被训练**。
+
+## 证据分析
+
+### 1. **优化器只包含 policy_net**
+````python
+opt = optim.Adam(policy_net.parameters(), lr=ADAM_LEARNING_RATE)
+# 注意：这里只有 policy_net.parameters()，没有 prior_net.parameters()
+````
+
+### 2. **prior_net 的输出被 detach()**
+````python
+# 在 NetWithPrior.forward() 中：
+return self.net(x, k) + self.prior_scale * self.prior(x, k).detach()
+#                                                              ^^^^^^^^
+# .detach() 切断了梯度流，prior_net 不会接收到梯度
+````
+
+### 3. **prior_net 只在初始化时设置权重**
+````python
+prior_net = EnsembleNet(N_ENSEMBLE)  # 创建时随机初始化
+# 之后再也没有更新过这些权重
+````
+
+## 验证代码
+
+````python
+# 可以通过以下代码验证：
+def check_prior_training():
+    # 记录 prior_net 的初始权重
+    initial_weights = {}
+    for name, param in prior_net.named_parameters():
+        initial_weights[name] = param.clone().detach()
+    
+    # 训练几个epoch后检查
+    # ... 训练代码 ...
+    
+    # 检查权重是否改变
+    weights_changed = False
+    for name, param in prior_net.named_parameters():
+        if not torch.equal(initial_weights[name], param):
+            weights_changed = True
+            break
+    
+    print(f"Prior net weights changed: {weights_changed}")  # 应该输出 False
+````
+
+## Prior Network 的作用机制
+
+````python
+# Prior network 作为固定的随机函数：
+Q_total(s,a) = Q_learnable(s,a) + α * Q_prior(s,a)
+#              ^^^^^^^^^^^^^^     ^^^^^^^^^^^^^^^^^
+#              可训练部分          固定随机先验
+````
+
+### 目的：
+1. **提供持久多样性**：每个头有不同的固定随机偏好
+2. **增强探索**：即使在 ε-greedy 为 0 时也能探索
+3. **避免头塌缩**：防止所有头收敛到相同策略
+
+## 为什么设计成不训练？
+
+1. **保持多样性**：如果 prior_net 也被训练，它可能会收敛到相似的策略，失去多样性作用
+
+2. **理论基础**：基于 Thompson Sampling 的思想，先验应该是固定的随机函数
+
+3. **简化实现**：避免复杂的双网络训练逻辑
+
+## 如果想让 prior_net 可训练
+
+如果你想实验可训练的先验，可以这样修改：
+
+````python
+# 方案1：移除 detach()
+class NetWithPrior(nn.Module):
+    def forward(self, x, k):
+        if self.prior_scale > 0.:
+            # 移除 .detach()，让梯度流过
+            return self.net(x, k) + self.prior_scale * self.prior(x, k)
+
+# 方案2：将 prior_net 加入优化器
+opt = optim.Adam(list(policy_net.parameters()) + list(prior_net.parameters()), 
+                 lr=ADAM_LEARNING_RATE)
+````
+
+**总结**：当前代码中 `prior_net` 确实没有被训练，这是设计的一部分，用于提供固定的随机先验函数来增强探索和保持头之间的多样性。
