@@ -75,7 +75,7 @@ class memoryDataset(object):
         terminal = torch.tensor(np.stack(batch.terminal), dtype=torch.long)
         mask = torch.tensor(np.stack(batch.mask), dtype=torch.float)
         batch = self.subset(state, action, next_state, reward, done, life, terminal, mask)
-        
+
         return batch
 
 class historyDataset(object):
@@ -85,7 +85,7 @@ class historyDataset(object):
     '''
     def __init__(self, history_size, img, crop_flag=False):
         '''
-        history_size: int, number of frames to stack
+        history_size: int, number of frames to stack 帧堆叠的长度
         img: np.array, initial observation image 输出图像的观察图片
         crop_flag: boolean, whether to crop the image (for breakout) 是否对图片进行裁剪，去除多余的无效区域
         '''

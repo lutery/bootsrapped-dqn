@@ -95,8 +95,8 @@ class DQNSolver():
             self.target_model = build_model(config) # 构建目标动作策略模型
 
         self.resize_unit = config.resize_unit
-        self.class_num = config.class_num
-        self.n_ensemble = config.n_ensemble
+        self.class_num = config.class_num # 动作数量
+        self.n_ensemble = config.n_ensemble # 动作预测的头数
 
         self.policy_model.to(config.device)
         self.target_model.to(config.device)
@@ -128,10 +128,10 @@ class DQNSolver():
         if not os.path.isdir(config.out_dir):
             os.mkdir(config.out_dir)
 
-        self.test_score_memory = []
-        self.test_length_memory = []
-        self.train_score_memory = []
-        self.train_length_memory = []
+        self.test_score_memory = [] # 存储每次评估的得分
+        self.test_length_memory = [] # 存储每次评估的步数
+        self.train_score_memory = [] # 记录每次评估时，最近10个回合的平均得分
+        self.train_length_memory = [] # 记录每次评估时，最近10个回合的平均步数
 
         ##중간시작
         self.start_steps = config.start_steps # 训练的起始步数
@@ -177,7 +177,7 @@ class DQNSolver():
                     else:
                         # vote
                         # 没有指定头编号，则使用所有头进行投票选择动作
-                        # 也就是每个头选择一个动作，然后选择出现频率最高的动作
+                        # 也就是每个头选择一个动作，然后选择动作Q值最大出现频率最高的动作
                         actions = self.target_model(state)
                         actions = [int(action.cpu().max(1).indices.numpy()) for action in actions]
                         actions = Counter(actions)
@@ -234,50 +234,78 @@ class DQNSolver():
         mask = batch.mask.to(self.device)
 
         with torch.no_grad():
+            # 利用下一个状态计算下一个状态的动作值，这里可以理解为Q值，这里可以看成是计算每一个动作的Q值（有多少维度就有多少个Q值）
             next_state_action_values = self.policy_model(next_state)
+        # 计算当前状态的动作值
         state_action_values = self.policy_model(state)
 
         total_loss = []
-        for head_num in range(self.n_ensemble):
+        for head_num in range(self.n_ensemble): # 遍历每一个动作预测头
+            # 获取所有训练样本中指定头head_num的样本掩码之和
             total_used = torch.sum(mask[:, head_num])
-            if total_used > 0.0:
+            if total_used > 0.0: # 如果样本中有一个样本的mask是1， 则训练当前头
+                # next_state_action_values[head_num]获取对应头的下一个状态动作值，包含所有的样本状态
+                # torch.max(next_state_action_values[head_num], dim=1).values.view(-1, 1)获取对应头的下一个状态动作值的最大值，包含所有的样本状态
                 next_state_value = torch.max(next_state_action_values[head_num], dim=1).values.view(-1, 1)
                 reward = reward.view(-1, 1)
+                # reward + (self.discount * next_state_value), 计算目标Q值
+                # reward, 计算即时奖励
+                # gather(1, terminal)，在维度1上根据terminal索引选择对应的值
+                # 索引含义：
+                # [:, 0] -> reward + discount * next_state_value  (非终止状态的Q值计算)
+                # [:, 1] -> reward                                (终止状态的Q值计算)
                 target_state_value = torch.stack([reward + (self.discount * next_state_value), reward], dim=1).squeeze().gather(1, terminal)
+                # 当前状态的动作Q值根据模型基于现在的状态预测的动作值结合实际执行的动作得到
                 state_action_value = state_action_values[head_num].gather(1, action)
+                # 当前状态模型预测的Q值需要和目标Q值进行对齐得到loss
+                # reduction='none'表示不进行任何归约操作，返回与输入张量相同形状的张量，这样会保持每个样本的loss
+                # 方便后续只计算掩码为1的loss
                 loss = F.smooth_l1_loss(state_action_value, target_state_value, reduction='none')
+                # 只计算掩码为1的样本的loss，其他样本的loss置为0
                 loss = mask[:, head_num] * loss
+                # 计算当前头的平均loss，除以掩码为1的样本数
                 loss = torch.sum(loss / total_used)
                 total_loss.append(loss)
 
         if len(total_loss) > 0:
+            # 计算所有头的平均loss
+            # 然后开始反向传播和优化
             total_loss = sum(total_loss)/self.n_ensemble
             total_loss.backward()
             self.optimizer.step()
 
 
     def valid_run(self):
+        '''
+        评估模型
+        '''
 
         state = self.valid_env.reset()
+        # 构建初始的帧样本数据
         valid_history = historyDataset(self.history_size, state, self.crop_flag)
-        score = 0
-        count = 0
+        score = 0 # 评估得分
+        count = 0 # 评估步数
         terminal = True
         done = False
         last_life = 0
 
         ## put valid time limits to make it fast evaluation
         while not done and count < self.max_eval_iter:
+            # 选择最大Q值出现频率最高的动作
             action = self.choose_action(valid_history)
             if terminal: ## There is error when it is just started. So do action = 1 at first
+               # 游戏刚开始或者者生命值减少时，terminal会被置为True，则需要执行动作1
                action = 1
+            # 执行动作
             next_state, reward, done, life = self.valid_env.step(action)
             valid_history.push(next_state)
+            # 记录分数
             score += reward
             life = life['ale.lives']
-            count = count + 1
+            count = count + 1 # 更新步数
 
             ## Terminal options
+            # 计算是否丢失了一条生命
             if life < last_life:
                 terminal = True
             else:
@@ -287,13 +315,21 @@ class DQNSolver():
         return score, count
 
     def render_policy_net(self):
+        '''
+        测试时并渲染模型的动作选择过程
+        '''
 
         def get_concat_h(im1, im2):
+            '''
+            水平拼接图片
+            '''
             baseheight = im1.size[1]
+            # 计算im2的宽度，使得im2的高度和im1一致
             wpercent = (baseheight / float(im2.size[1]))
             wsize = int((float(im2.size[0]) * float(wpercent)))
             im2_modified = im2.resize((wsize, baseheight), Image.ANTIALIAS)
 
+            # 创建一个新的图片，宽度是im1和im2_modified的宽度之和，高度是im1的高度
             dst = Image.new('RGB', (im1.width + im2_modified.width, im1.height))
             dst.paste(im1, (0, 0))
             dst.paste(im2_modified, (im1.width, 0))
@@ -309,39 +345,46 @@ class DQNSolver():
             return dst
 
         arrow_images = []
+        # 看来当前代码主要是针对Breakout游戏的
         if self.refer_img is not None and 'breakout' in self.config.env.lower():
+            # 这里加载参考图片，参考图片是一些箭头图片，用于渲染时显示动作选择
             arrow_files = [filename for filename in os.listdir(self.refer_img) if '.png' in filename]
             if len(arrow_files) >= self.class_num:
                 arrow_images = [Image.open(os.path.join(self.refer_img, filename)) for filename in arrow_files]
 
         state = self.env.reset()
         history = historyDataset(self.history_size, state, self.crop_flag)
-        score = 0
-        count = 0
+        score = 0 # 评估得分
+        count = 0 # 评估步数
         raw_frames = []
-        frames = []
+        frames = [] # 存储评估过程中的每一帧图片
         done = False
         terminal = True
         last_life = 0
         while not done:
-            action = self.choose_action(history)
-            actions = []
+            action = self.choose_action(history) # 选择最大Q值出现频率最高的动作
+            actions = [] # 没啥用，怀疑原本计划是在拼接箭头图片时使用，但是并没有使用，里面进行了重新计算
             for head_idx in range(self.config.n_ensemble):
-                actions.append(self.choose_action(history, head_idx))
+                actions.append(self.choose_action(history, head_idx)) # 每个头选择一个动作
 
             # img = Image.fromarray(next_state)
             # frames.append(img)
             img = self.env.render(mode='rgb_array')
-            img = Image.fromarray(img)
+            img = Image.fromarray(img) # 将观察帧转换为图片
             if len(arrow_images) > 0:
+                # 根据动作选择结果，加载对应的箭头图片
                 img2 = arrow_images[action]
+                # 水平拼接图片
                 img = get_concat_h(img, img2)
 
                 if self.config.n_ensemble > 1:
+                    # 如果有多个头，则将每个头选择的动作对应的箭头图片垂直拼接
                     merge_img = None
                     for head_idx in range(self.config.n_ensemble):
+                        # 先得到每个头选择的动作对应的箭头图片进行垂直拼接
                         action_img = arrow_images[self.choose_action(history, head_idx)]
                         merge_img = get_concat_v(merge_img, action_img)
+                    # 然后将垂直拼接的图片和观察图片进行水平拼接，显示所有头的选择结果
                     img = get_concat_h(img, merge_img)
 
             frames.append(img)
@@ -350,7 +393,7 @@ class DQNSolver():
             if terminal: ## There is error when it is just started. So do action = 1 at first
                action = 1
             next_state, reward, done, life = self.env.step(action)
-            history.push(next_state)
+            history.push(next_state) # 更新观察样本
 
             score += reward
             life = life['ale.lives']
@@ -363,6 +406,7 @@ class DQNSolver():
                 terminal = False
             last_life = life
         self.env.close()
+        # 将评估的结果保存为GIF图片
         frames[0].save(os.path.join(self.out_dir, 'Breakout_result.gif'), format='GIF', append_images=frames[1:], save_all=True, duration=0.0001)
         print("save picture -- Breakout_result.gif")
         print("score", score)
@@ -381,11 +425,11 @@ class DQNSolver():
         train_scores = deque(maxlen=10)
         train_lengths = deque(maxlen=10)
         episode = 0
-        max_score = 0
+        max_score = 0 # 评估的最大分数
 
         ##If it is done everytime init value
-        train_score = 0
-        train_length = 0
+        train_score = 0 # 当前游戏回合的得分
+        train_length = 0 # 当前游戏回合的长度
         last_life = 0 # 记录上一次的生命数
         terminal = True
 
@@ -433,7 +477,7 @@ class DQNSolver():
                 history.push(next_state)
                 next_state = history.get_state() # 获取执行动作后的下一个环境观察样本，这里是将实际执行的帧堆叠等处理后的样本作为实际的观察，因为他没有使用gym的环境包装
                 life = life['ale.lives'] # 获取还剩余的生命数
-                train_length = train_length + 1  # todo 有点疑似当前游戏回合的步数
+                train_length = train_length + 1 
 
                 ## Terminal options 判断生命是否丢失，如果丢失则判定为中断
                 # 因为对于breakout游戏，中断了需要执行动作1才能继续游戏
@@ -449,34 +493,44 @@ class DQNSolver():
                     # 达到了起始训练的步数，并且到了训练的更新频率，则进行模型训练
                     self.replay(self.batch_size)
 
-                train_score = train_score + reward
+                train_score = train_score + reward # 累计当前回合的得分
 
                 if step > self.eval_steps and step % self.eval_freq == 0:
-                    train_mean_score = np.mean(train_scores)
-                    train_mean_length = np.mean(train_lengths)
+                    # 进入模型评估阶段
+                    train_mean_score = np.mean(train_scores) # 计算最近10个回合的平均得分
+                    train_mean_length = np.mean(train_lengths) # 计算最近10个回合的平均长度
                     self.train_score_memory.append(train_mean_score)
                     self.train_length_memory.append(train_mean_length)
 
+                    # train_score: 将最近10个回合的平均得分存储起来，覆盖之前的
+                    # train_length: 将最近10个回合的平均长度存储起来，覆盖之前的
                     save_numpy(self.train_score_memory, self.out_dir, 'train_score')
                     save_numpy(self.train_length_memory, self.out_dir, 'train_length_memory')
 
+                    # 评估模型，得到评估得分和评估执行的步数
                     valid_score, valid_length = self.valid_run()
                     self.test_score_memory.append(valid_score)
                     self.test_length_memory.append(valid_length)
 
+                    # 存储评估得分和评估步数
                     save_numpy(self.test_score_memory, self.out_dir, 'test_score')
                     save_numpy(self.test_length_memory, self.out_dir, 'test_length_memory')
 
                     if valid_score >= max_score:
+                        # 如果评估的分数大于之前的最大分数，则保存当前模型
+                        # 不过这里只是保存模型，没有保存优化器等其他状态，所以不是可持续化训练的保存方式
                         max_score = valid_score
                         save_model(self.policy_model, self.out_dir)
-
+                    
+                    # 更新训练进度信息
                     progress_bar.set_postfix_str(
                         '[Episode %s] - train_score : %.2f, test_score : %.2f, max_score : %.2f, epsilon : %.2f' % (episode,
                                                                                                                     train_mean_score,
                                                                                                                     valid_score,
                                                                                                                     max_score,
                                                                                                                     self.get_epsilon(step)))
+                    
+                    # # 打印训练的进度 日志
                     logging.debug(
                         '[Episode %s] - train_score : %.2f, test_score : %.2f, max_score : %.2f, epsilon : %.2f' % (episode,
                                                                                                                     train_mean_score,
@@ -485,6 +539,7 @@ class DQNSolver():
                                                                                                                     self.get_epsilon(step)))
         except Exception as e:
             # Get current system exception
+            # 如果出现异常，打印异常信息、堆栈
             ex_type, ex_value, ex_traceback = sys.exc_info()
 
             # Extract unformatter stack traces as tuples
@@ -507,6 +562,7 @@ if __name__ == '__main__':
     if config.mode == "train":
         agent.train()
     if config.mode =="test":
+        # 测试模型，需要确保已经有预训练模型
         if config.pretrained_dir is None:
             raise ValueError(
                 "평가를 하려면 pretrained_dir 에 저장된 모델을 넣어야 합니다. {}".format(
